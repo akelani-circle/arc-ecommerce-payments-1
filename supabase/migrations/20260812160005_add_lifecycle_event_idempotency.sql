@@ -21,20 +21,21 @@ begin
   select count(*)
   into v_duplicate_groups
   from (
-    select tx_hash, operation
+    select order_id, tx_hash, operation
     from public.lifecycle_events
-    group by tx_hash, operation
+    group by order_id, tx_hash, operation
     having count(*) > 1
   ) duplicates;
 
   if v_duplicate_groups > 0 then
     raise exception
-      'Cannot add lifecycle event uniqueness constraint: % duplicate (tx_hash, operation) groups found. Review existing records before retrying.',
+      'Cannot add lifecycle event uniqueness constraint: % duplicate (order_id, tx_hash, operation) groups found. Review existing records before retrying.',
       v_duplicate_groups;
   end if;
 end;
 $$;
 
+-- Scoped per order: one transaction can emit the same event for several orders.
 alter table public.lifecycle_events
-  add constraint lifecycle_events_tx_hash_operation_key
-  unique (tx_hash, operation);
+  add constraint lifecycle_events_order_tx_operation_key
+  unique (order_id, tx_hash, operation);

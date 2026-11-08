@@ -19,18 +19,29 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { formatUnits } from "viem";
 
-type ScpEventName =
-  | "Authorized"
-  | "Captured"
-  | "Charged"
-  | "Voided"
-  | "Reclaimed"
-  | "Refunded";
+const SCP_EVENT_NAMES = [
+  "Authorized",
+  "Captured",
+  "Charged",
+  "Voided",
+  "Reclaimed",
+  "Refunded",
+] as const;
+
+type ScpEventName = (typeof SCP_EVENT_NAMES)[number];
+
+// Events whose amount moves captured_amount / refunded_amount, so it must be present.
+const AMOUNT_REQUIRED: ReadonlySet<ScpEventName> = new Set(["Captured", "Refunded"]);
+
+function isScpEventName(value: unknown): value is ScpEventName {
+  return SCP_EVENT_NAMES.some((name) => name === value);
+}
 
 interface ScpWebhookPayload {
   contractAddress: string;
-  eventName: ScpEventName;
+  eventName: string;
   data: {
     salt?: string;
     amount?: string;
@@ -39,16 +50,16 @@ interface ScpWebhookPayload {
   };
 }
 
-function toTokenUnits(raw: string | undefined): number | undefined {
-  if (!raw) return undefined;
-
-  const value = Number(raw);
-
-  if (!Number.isFinite(value)) {
-    return undefined;
+/**
+ * Base units (6 decimals) -> exact decimal string for numeric(20,6).
+ * Returns null when absent, and throws on anything that is not a non-negative integer.
+ */
+function toTokenAmount(raw: string | undefined): string | null {
+  if (raw === undefined) return null;
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`invalid amount: ${raw}`);
   }
-
-  return value / 1_000_000;
+  return formatUnits(BigInt(raw), 6);
 }
 
 function verifyWebhookSignature(
@@ -81,7 +92,7 @@ export async function handleWebhook(
 
     return NextResponse.json(
       { error: "webhook not configured" },
-      { status: 500 },
+      { status: 503 },
     );
   }
 
@@ -125,12 +136,35 @@ export async function handleWebhook(
     return NextResponse.json({ ok: true });
   }
 
+  // The contract may emit events this store does not track; acknowledge them so SCP stops retrying.
+  if (!isScpEventName(eventName)) {
+    console.log(`[webhook] ignoring untracked event ${String(eventName)}`);
+    return NextResponse.json({ ok: true, ignored: true });
+  }
+
+  let amount: string | null;
+  try {
+    amount = toTokenAmount(data.amount);
+  } catch {
+    return NextResponse.json({ error: "invalid amount" }, { status: 400 });
+  }
+
+  if (AMOUNT_REQUIRED.has(eventName) && amount === null) {
+    return NextResponse.json({ error: "missing amount" }, { status: 400 });
+  }
+
+  const txHash = data.transactionHash;
+
+  if (!txHash) {
+    return NextResponse.json(
+      { error: "missing transaction hash" },
+      { status: 400 },
+    );
+  }
 
   const { data: order, error: fetchError } = await supabase
     .from("orders")
-    .select(
-      "id, status, total, currency, captured_amount, refunded_amount",
-    )
+    .select("id")
     .filter("payment_info->>salt", "eq", salt)
     .single();
 
@@ -147,43 +181,15 @@ export async function handleWebhook(
     );
   }
 
-  const txHash = data?.transactionHash;
-
-  const amount = toTokenUnits(data?.amount);
-
-  if (!txHash) {
-    return NextResponse.json(
-      { error: "missing transaction hash" },
-      { status: 400 },
-    );
-  }
-
-  let note: string | null = null;
-
-  if (eventName === "Captured" || eventName === "Refunded") {
-    const currentAmount = amount ?? 0;
-
-    if (eventName === "Captured") {
-      const newCaptured = (order.captured_amount ?? 0) + currentAmount;
-      note = newCaptured >= order.total - 0.0001 ? null : "partial";
-    } else {
-      const newRefunded = (order.refunded_amount ?? 0) + currentAmount;
-      note =
-        newRefunded >=
-        (order.captured_amount ?? order.total) - 0.0001
-          ? null
-          : "partial";
-    }
-  }
-
+  // The RPC derives the "partial" note itself, under the order row lock.
   const { data: processed, error: processError } = await supabase.rpc(
     "process_webhook_event",
     {
       p_order_id: order.id,
       p_operation: eventName,
       p_tx_hash: txHash,
-      p_amount: amount ?? null,
-      p_note: note,
+      p_amount: amount,
+      p_note: null,
       p_block_number: data.blockNumber ?? null,
     },
   );
@@ -210,7 +216,7 @@ export async function handleWebhook(
   }
   console.log(
     `[webhook] ${eventName} -> order ${order.id} processed`,
-    { txHash, amount, note },
+    { txHash, amount },
   );
 
   return NextResponse.json({ ok: true });

@@ -1,6 +1,6 @@
 -- Atomically record a lifecycle event and apply its order transition.
 -- Duplicate deliveries are ignored by the UNIQUE constraint on
--- lifecycle_events(tx_hash, operation).
+-- lifecycle_events(order_id, tx_hash, operation).
 
 create or replace function public.process_webhook_event(
   p_order_id uuid,
@@ -38,7 +38,7 @@ begin
     p_note,
     p_block_number
   )
-  on conflict (tx_hash, operation) do nothing;
+  on conflict (order_id, tx_hash, operation) do nothing;
 
   if not found then
     return false;
@@ -59,6 +59,7 @@ begin
 
     if v_captured_amount >= v_total - 0.0001 then
       v_status := 'Paid';
+      v_note := null;
     else
       v_status := null;
       v_note := 'partial';
@@ -73,9 +74,11 @@ begin
   elsif p_operation = 'Refunded' then
     v_refunded_amount := v_refunded_amount + coalesce(p_amount, 0);
 
+    -- captured_amount defaults to 0, so fall back to total only when nothing was captured.
     if v_refunded_amount >=
-       coalesce(v_captured_amount, v_total) - 0.0001 then
+       coalesce(nullif(v_captured_amount, 0), v_total) - 0.0001 then
       v_status := 'Refunded';
+      v_note := null;
     else
       v_status := null;
       v_note := 'partial';
@@ -115,13 +118,16 @@ begin
 
   update public.lifecycle_events
   set note = v_note
-  where tx_hash = p_tx_hash
+  where order_id = p_order_id
+    and tx_hash = p_tx_hash
     and operation = p_operation;
 
   return true;
 end;
 $$;
 
+-- Supabase's default privileges grant EXECUTE to anon and authenticated directly, so revoking
+-- from public alone would leave this SECURITY DEFINER function callable with the publishable key.
 revoke all on function public.process_webhook_event(
   uuid,
   text,
@@ -129,7 +135,7 @@ revoke all on function public.process_webhook_event(
   numeric,
   text,
   bigint
-) from public;
+) from public, anon, authenticated;
 
 grant execute on function public.process_webhook_event(
   uuid,

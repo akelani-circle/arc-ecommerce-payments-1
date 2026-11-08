@@ -119,6 +119,7 @@ test("signature is verified against the raw request body", async () => {
       eventName: "Authorized",
       data: {
         salt: "123",
+        transactionHash: "0xraw",
       },
     },
     null,
@@ -306,4 +307,99 @@ test("concurrent duplicate deliveries are gracefully handled", async () => {
     results.filter((result) => result.duplicate === true).length,
     1,
   );
+});
+
+function untouchedSupabase(onTouch: () => void) {
+  return {
+    from() {
+      onTouch();
+      throw new Error("Supabase must not be touched");
+    },
+    rpc() {
+      onTouch();
+      throw new Error("Supabase must not be touched");
+    },
+  } as never;
+}
+
+function capturedEvent(data: Record<string, unknown>, eventName = "Captured") {
+  return JSON.stringify({
+    contractAddress: "0x123",
+    eventName,
+    data: { salt: "123", transactionHash: "0xabc", blockNumber: 1, ...data },
+  });
+}
+
+test("an untracked event is acknowledged without touching the database", async () => {
+  process.env.WEBHOOK_SECRET = SECRET;
+  let touched = false;
+  const body = capturedEvent({ amount: "1000000" }, "OwnershipTransferred");
+
+  const response = await handleWebhook(request(body, sign(body)), untouchedSupabase(() => (touched = true)));
+
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).ignored, true);
+  assert.equal(touched, false);
+});
+
+for (const amount of ["abc", "-5000000", "1.5", "1e6", ""]) {
+  test(`a malformed amount ${JSON.stringify(amount)} is rejected before anything is recorded`, async () => {
+    process.env.WEBHOOK_SECRET = SECRET;
+    let touched = false;
+    const body = capturedEvent({ amount });
+
+    const response = await handleWebhook(request(body, sign(body)), untouchedSupabase(() => (touched = true)));
+
+    assert.equal(response.status, 400);
+    assert.equal(touched, false);
+  });
+}
+
+test("a Captured event without an amount is rejected before anything is recorded", async () => {
+  process.env.WEBHOOK_SECRET = SECRET;
+  let touched = false;
+  const body = capturedEvent({});
+
+  const response = await handleWebhook(request(body, sign(body)), untouchedSupabase(() => (touched = true)));
+
+  assert.equal(response.status, 400);
+  assert.equal(touched, false);
+});
+
+test("the amount reaches the RPC as an exact decimal string", async () => {
+  process.env.WEBHOOK_SECRET = SECRET;
+  const body = capturedEvent({ amount: "123456789012345678" });
+  let rpcArgs: Record<string, unknown> | undefined;
+
+  const supabase = {
+    from() {
+      return {
+        select() {
+          return { filter: () => ({ single: async () => ({ data: { id: "order-1" }, error: null }) }) };
+        },
+      };
+    },
+    rpc: async (_name: string, args: Record<string, unknown>) => {
+      rpcArgs = args;
+      return { data: true, error: null };
+    },
+  } as never;
+
+  const response = await handleWebhook(request(body, sign(body)), supabase);
+
+  assert.equal(response.status, 200);
+  assert.equal(rpcArgs?.p_amount, "123456789012.345678");
+  assert.equal(rpcArgs?.p_note, null);
+});
+
+test("a missing WEBHOOK_SECRET fails closed with 503", async () => {
+  delete process.env.WEBHOOK_SECRET;
+  let touched = false;
+  const body = capturedEvent({ amount: "1" });
+
+  const response = await handleWebhook(request(body, "sig"), untouchedSupabase(() => (touched = true)));
+
+  assert.equal(response.status, 503);
+  assert.equal(touched, false);
+  process.env.WEBHOOK_SECRET = SECRET;
 });
