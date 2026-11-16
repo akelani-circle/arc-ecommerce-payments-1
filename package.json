@@ -17,6 +17,8 @@
     "db:reset": "supabase db reset",
     "db:migration": "supabase migration new",
     "db:migrate": "supabase migration up",
+    "db:push": "supabase db push --linked",
+    "db:remote-status": "supabase migration list",
     "db:types": "supabase gen types typescript --local > lib/database.types.ts"
   },
   "dependencies": {
@@ -29,7 +31,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.17.0",
-    "next": "16.2.7",
+    "next": "16.3.6",
     "next-themes": "^0.4.6",
     "radix-ui": "^1.5.0",
     "react": "19.2.4",
