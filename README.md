@@ -44,7 +44,7 @@ Running `npm run setup` provisions the operator and merchant wallets, deploys pi
 
 1. Clone the repository and install dependencies:
   ```bash
-   git clone https://github.com/akelani-circle/arc-ecommerce-payments.git
+   git clone https://github.com/circlefin/arc-ecommerce-payments.git
    cd arc-ecommerce-payments
    npm install
   ```
@@ -54,18 +54,25 @@ Running `npm run setup` provisions the operator and merchant wallets, deploys pi
   ```
    Open `.env.local` and fill in your Supabase keys, your Circle API key and entity secret, and (optionally) your WalletConnect project ID. The Arc Testnet RPC URL is pre-filled. See [Environment Variables](#environment-variables) for the full list. The wallet IDs and the deployed contract addresses are written automatically by the setup script, so leave those blank.
   > **Register your entity secret first.** Circle's Developer-Controlled Wallets require a one-time entity secret registration before the SDK can sign anything. Follow [the registration guide](https://developers.circle.com/wallets/dev-controlled/register-entity-secret) and store the recovery file **outside** the repository. Set `CIRCLE_API_KEY` and `CIRCLE_ENTITY_SECRET` in `.env.local` afterward.
-3. Set up the onchain side in one command:
+3. Apply the Supabase schema before taking orders. For a hosted Supabase project, install the [Supabase CLI](https://supabase.com/docs/guides/cli), authenticate, and link this checkout to the project that is configured in `.env.local`:
+  ```bash
+   npx supabase login
+   npx supabase link --project-ref YOUR_PROJECT_REF
+   npm run db:remote-status   # review local vs. linked migrations
+   npm run db:push            # applies pending migrations to the linked project
+  ```
+   `YOUR_PROJECT_REF` is the subdomain in `https://YOUR_PROJECT_REF.supabase.co`. The push is intentionally explicit because it changes the hosted database; `npm run setup` only provisions Circle wallets and contracts and never changes Supabase. The CLI may ask for the database password or access token. Review the migrations in `supabase/migrations/` before applying them, and do not commit credentials.
+4. Set up the onchain side in one command:
   ```bash
    npm run setup
   ```
    The setup script (`scripts/setup.ts`) is idempotent end to end:
   1. Ensures the three Developer-Controlled wallets the store needs - **deployer**, **operator** (submits + sponsors gas), and **merchant** (funds receiver) - creating any that are missing and writing their ids/addresses to `.env.local` so reruns reuse them.
   2. Deploys `AuthCaptureEscrow` (no constructor args, deploys its own `TokenStore`) and `ERC3009PaymentCollector` (escrow + Multicall3 addresses) via the Smart Contract Platform, then writes `NEXT_PUBLIC_ESCROW_ADDRESS` and `NEXT_PUBLIC_TOKEN_COLLECTOR_ADDRESS` back. Skipped if both are already set.
-  3. Seeds the operator with a little Arc gas (USDC) from the deployer, since the operator pays for every checkout transaction.
-    cause Arc uses USDC as native gas, the deployer must hold some before contracts can deploy. If it is empty the script prints its address and the [faucet](https://faucet.circle.com) link, then exits - fund it and re-run. To deploy a fresh pair of contracts, force it:
-    `bash m run setup -- --force` 
-    The protocol source is pinned to a specific commit and compiled with the Cancun EVM target. Arc Testnet runs a newer hardfork, so no source changes are needed. Provenance and the compatibility notes live in `[contracts/README.md](contracts/README.md)`.
-4. Start the development server:
+  3. Seeds the operator with a little Arc gas (USDC) from the deployer, since the operator pays for every checkout transaction. Because Arc uses USDC as native gas, the deployer must hold some before contracts can deploy. If it is empty the script prints its address and the [faucet](https://faucet.circle.com) link, then exits - fund it and re-run. To deploy a fresh pair of contracts, force it:
+     `npm run setup -- --force`
+     The protocol source is pinned to a specific commit and compiled with the Cancun EVM target. Arc Testnet runs a newer hardfork, so no source changes are needed. Provenance and the compatibility notes live in [contracts/README.md](contracts/README.md).
+5. Start the development server:
   ```bash
    npm run dev
   ```
@@ -96,9 +103,9 @@ The token collector is the piece that pulls funds into escrow. This app uses the
 
 | Contract                  | Address                                                                                                                        | Purpose                                                                              |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| `AuthCaptureEscrow`       | `[0xa5b4fa1890619cf03b8d6b11e0c680345b1881d8](https://testnet.arcscan.app/address/0xa5b4fa1890619cf03b8d6b11e0c680345b1881d8)` | The escrow that holds reserved funds and releases them on capture                    |
-| `ERC3009PaymentCollector` | `[0x01e39d4a0b8ffeac8ae1618dbf316d15a8ee867c](https://testnet.arcscan.app/address/0x01e39d4a0b8ffeac8ae1618dbf316d15a8ee867c)` | Pulls USDC/EURC into escrow from the shopper's signed ERC-3009 authorization         |
-| Multicall3                | `[0xcA11bde05977b3631167028862bE2a173976CA11](https://testnet.arcscan.app/address/0xcA11bde05977b3631167028862bE2a173976CA11)` | Canonical helper, a constructor dependency of the collector (already present on Arc) |
+| `AuthCaptureEscrow`       | [`0xa5b4fa1890619cf03b8d6b11e0c680345b1881d8`](https://testnet.arcscan.app/address/0xa5b4fa1890619cf03b8d6b11e0c680345b1881d8) | The escrow that holds reserved funds and releases them on capture                    |
+| `ERC3009PaymentCollector` | [`0x01e39d4a0b8ffeac8ae1618dbf316d15a8ee867c`](https://testnet.arcscan.app/address/0x01e39d4a0b8ffeac8ae1618dbf316d15a8ee867c) | Pulls USDC/EURC into escrow from the shopper's signed ERC-3009 authorization         |
+| Multicall3                | [`0xcA11bde05977b3631167028862bE2a173976CA11`](https://testnet.arcscan.app/address/0xcA11bde05977b3631167028862bE2a173976CA11) | Canonical helper, a constructor dependency of the collector (already present on Arc) |
 
 
 These are the addresses produced by `npm run setup`. Your own deployment will have different addresses, written into `.env.local` and read centrally from `lib/contracts/index.ts`. `npm run setup` also deploys an `OperatorRefundCollector` (pinned to `NEXT_PUBLIC_REFUND_COLLECTOR_ADDRESS`) used by the refund path below.
@@ -147,7 +154,7 @@ Prices render in the shopper's chosen currency via a toggle, and every order set
 | Field    | Value                                                     |
 | -------- | --------------------------------------------------------- |
 | Chain ID | `5042002` (hex `0x4CEF52`), ships as `arcTestnet` in viem |
-| RPC      | `https://rpc.testnet.arc.network`                         |
+| RPC      | `https://rpc.testnet.arc.io`                         |
 | Explorer | [testnet.arcscan.app](https://testnet.arcscan.app)        |
 | Faucet   | [faucet.circle.com](https://faucet.circle.com)            |
 | USDC     | `0x3600000000000000000000000000000000000000` (6 decimals) |
@@ -174,18 +181,17 @@ Authorization is keyed off `app_metadata.role`, not the email address. `app_meta
 
 
 
-### Demo admin (auto-seeded)
+### Admin account
 
-A single admin account is bootstrapped on server boot (`instrumentation.ts` runs `lib/supabase/seed-admin.ts`). It is idempotent: created if missing, otherwise its `admin` role claim is ensured. This requires `SUPABASE_SECRET_KEY` (the service-role key) and is skipped with a warning if that is unset.
+The admin role can capture, void and refund orders, so the app never creates or promotes an admin itself. Set one up once:
 
+1. Sign up (or create the user in the Supabase dashboard) with the email you want to use.
+2. In Supabase, set that user's `app_metadata` to `{ "role": "admin" }` (dashboard, or `auth.admin.updateUserById` with the service-role key).
+3. Set `ADMIN_EMAIL` in `.env.local` to the same address.
 
-| Field    | Value             |
-| -------- | ----------------- |
-| Email    | `admin@admin.com` |
-| Password | `123456`          |
+On boot, `lib/supabase/seed-admin.ts` checks that this user exists and has the role, and logs a warning if not. It needs `SUPABASE_SECRET_KEY` and is skipped with a warning if that is unset.
 
-
-These credentials are hardcoded on purpose. This is a demo where zero setup matters more than secrecy. Disable email confirmation in the Supabase dashboard under **Authentication, Sign In / Providers, Email, "Confirm email" off.**
+For local testing you can disable email confirmation in the Supabase dashboard under **Authentication, Sign In / Providers, Email, "Confirm email" off.**
 
 ## Environment Variables
 
@@ -195,8 +201,9 @@ All variables live in `.env.local`. The setup script writes the wallet IDs/addre
 | Variable                                                             | Purpose                                      | How to get it                                                                |
 | -------------------------------------------------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------- |
 | `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`  | Auth and orders                              | Supabase project settings, or `npm run db:status` for local                  |
-| `SUPABASE_SECRET_KEY`                                                | Admin auto-seed, server only                 | Service-role key. Never expose to the browser                                |
-| `NEXT_PUBLIC_ARC_RPC_URL`                                            | Wallet and reads                             | Defaults to `https://rpc.testnet.arc.network`                                |
+| `SUPABASE_SECRET_KEY`                                                | Admin check on boot, server only             | Service-role key. Never expose to the browser                                |
+| `ADMIN_EMAIL`                                                        | Which account is the admin                   | The email of the user you gave `app_metadata.role = "admin"`                  |
+| `NEXT_PUBLIC_ARC_RPC_URL`                                            | Wallet and reads                             | Defaults to `https://rpc.testnet.arc.io`                                   |
 | `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID`                               | RainbowKit QR / mobile                       | [cloud.reown.com](https://cloud.reown.com). Injected wallets work without it |
 | `CIRCLE_API_KEY` / `CIRCLE_ENTITY_SECRET`                            | Operator backend, setup script               | Circle Console. Backend only, never commit                                   |
 | `DEPLOYER_WALLET_SET_ID` / `DEPLOYER_WALLET_ID`                      | Setup script                                 | Written automatically on first setup                                         |
@@ -217,7 +224,14 @@ npm run db:start     # start the local stack
 npm run db:status    # print local URLs and keys (use these in .env.local)
 npm run db:stop      # stop the stack
 npm run db:reset     # reset the local database
+npm run db:migrate   # apply local migrations to the local database
 ```
+
+`npm run db:migrate` is local-only (`supabase migration up`). It does not apply
+anything to a hosted project. Use `npm run db:push` after `supabase link` for a
+hosted project, and `npm run db:remote-status` to inspect the linked project's
+migration history. Keep `.env.local` pointed at the same Supabase project whose
+migrations you pushed before starting the app.
 
 
 
@@ -325,8 +339,8 @@ curl -X POST https://api.circle.com/v1/w3s/contracts/event-monitors \
   }'
 ```
 
-Set `WEBHOOK_SECRET=<your-WEBHOOK_SECRET>` in `.env.local`, then uncomment the HMAC-SHA256 signature verification block at the top of `app/api/webhooks/payments/route.ts`. Circle signs each push request with the shared secret; the handler verifies it before processing.
+Set `WEBHOOK_SECRET=<your-WEBHOOK_SECRET>` in `.env.local`. Circle signs each push request with the shared secret; the handler verifies `x-scp-signature` (HMAC-SHA256) before processing and answers `503` while the secret is unset.
 
 ## **Legal disclaimer**
 
-Sample apps provided for demonstration and educational purposes only, intended for Arc testnet use only, and not production-ready. See ++[Arc.io](http://Arc.io)++ for more.
+Sample apps provided for demonstration and educational purposes only, intended for Arc testnet use only, and not production-ready. See [Arc](https://arc.io) for more.
