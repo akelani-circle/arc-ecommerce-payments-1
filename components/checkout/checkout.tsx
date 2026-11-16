@@ -50,7 +50,11 @@ import { ProductMedia } from "@/components/product-media";
 import { STATUS_COPY } from "@/lib/orders";
 import { ARC_CHAIN_ID, ARC_FAUCET_URL } from "@/lib/arc/chain";
 import { useTokenBalance } from "@/lib/arc/use-balances";
-import { type CheckoutPhase, submitCheckout } from "@/lib/checkout/submit";
+import {
+  type CheckoutPhase,
+  PaymentSettledError,
+  submitCheckout,
+} from "@/lib/checkout/submit";
 import { createClient } from "@/lib/supabase/client";
 
 const CURRENCIES: Currency[] = ["USDC", "EURC"];
@@ -170,6 +174,14 @@ export function Checkout() {
         }
       });
     } catch (e) {
+      if (e instanceof PaymentSettledError) {
+        // The money already moved; clearing the cart keeps Pay disabled so the
+        // shopper can't pay for it twice. The message carries the tx hash.
+        clear();
+        setPhase("done");
+        setError(e.message);
+        return;
+      }
       setPhase("idle");
       setError(
         e instanceof Error ? e.message : "Checkout failed. Please try again."
