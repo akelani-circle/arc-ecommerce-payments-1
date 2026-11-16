@@ -22,6 +22,7 @@ import type { Hex } from "viem";
 import { buildReceiveAuthTypedData } from "@/lib/payments/authorization";
 import { arcExplorerLink } from "@/lib/arc/chain";
 import type { Currency } from "@/lib/products";
+import { settledTxHash } from "@/lib/checkout/relay-failure";
 
 /**
  * Real checkout: ask the operator to build + hold the PaymentInfo, have the
@@ -45,13 +46,33 @@ type SignTypedData = (
   typedData: ReturnType<typeof buildReceiveAuthTypedData>,
 ) => Promise<Hex>;
 
-async function readError(res: Response, fallback: string): Promise<string> {
+/**
+ * The payment landed on-chain but the order could not be saved. The caller
+ * must not let the shopper pay for the same cart again.
+ */
+export class PaymentSettledError extends Error {
+  constructor(
+    message: string,
+    readonly txHash: string,
+  ) {
+    super(message);
+    this.name = "PaymentSettledError";
+  }
+}
+
+async function readFailure(
+  res: Response,
+  fallback: string,
+): Promise<{ message: string; settledTxHash: string | null }> {
   try {
     const body = await res.json();
     const message = body.error ?? fallback;
-    return body.txHash ? `${message} Transaction hash: ${body.txHash}` : message;
+    return {
+      message: body.txHash ? `${message} Transaction hash: ${body.txHash}` : message,
+      settledTxHash: settledTxHash(body),
+    };
   } catch {
-    return fallback;
+    return { message: fallback, settledTxHash: null };
   }
 }
 
@@ -78,7 +99,7 @@ export async function submitCheckout({
     body: JSON.stringify({ currency, payer, items }),
   });
   if (!intentRes.ok) {
-    throw new Error(await readError(intentRes, "Could not start checkout"));
+    throw new Error((await readFailure(intentRes, "Could not start checkout")).message);
   }
   const intent: {
     nonce: Hex;
@@ -106,7 +127,11 @@ export async function submitCheckout({
     body: JSON.stringify({ nonce: intent.nonce, signature }),
   });
   if (!relayRes.ok) {
-    throw new Error(await readError(relayRes, "Payment relay failed"));
+    const failure = await readFailure(relayRes, "Payment relay failed");
+    if (failure.settledTxHash) {
+      throw new PaymentSettledError(failure.message, failure.settledTxHash);
+    }
+    throw new Error(failure.message);
   }
   const { txHash, orderId, status } = await relayRes.json();
   return { orderId, status, txHash, explorerUrl: arcExplorerLink("tx", txHash) };
